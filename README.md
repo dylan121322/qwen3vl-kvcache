@@ -29,15 +29,113 @@ H3 布局: [固定前缀 + 图1..图N-1] [first_frame] [prompt]
 2. **缓存必须含每层输出 hidden**——图区间 hidden 链必须完整，否则最终 conditioning 输出无真值；
 3. **必须拆层存储**——整包 8.5GB 一次加载会挤爆 49GB 内存触发 swap（实测峰值页面文件 72.5GB），CPU 拉不满、收益被换页吃掉（v2 修复）。
 
-## 使用
+## 安装
 
-```bash
-set QWEN3VL_KV_CACHE=1    # 默认关闭；重启 ComfyUI / h3_runner 生效
+### 前置条件
+
+| 项 | 要求 |
+|---|---|
+| ComfyUI | Windows portable 版（2026-08-03 之后，含 MiniMax H3 节点支持）|
+| 环境路径 | `E:\ai\ComfyUI_windows_portable\`（本补丁按此路径开发验证）|
+| CLIP 权重 | `E:\ai\minimax_h3\text_encoders\qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors`（nvfp4 量化）|
+| Python | 使用 ComfyUI 自带的 `python_embeded\python.exe`，无需额外依赖 |
+
+### 安装步骤
+
+**1. 备份原文件**（重要——回滚靠它）：
+
+```bat
+cd /d E:\ai\ComfyUI_windows_portable\ComfyUI\comfy\text_encoders
+copy /y qwen3vl.py qwen3vl.py.bak_kvcache
+copy /y llama.py llama.py.bak_kvcache
+copy /y qwen35.py qwen35.py.bak_kvcache
 ```
 
-- 第一段 MISS（自动保存缓存），段 2+ 命中；first_frame 每段变化不影响命中
-- 缓存目录：`E:\ai\h3_kv_cache\<key>\00.pt … 49.pt`
-- 命中条件：前 N-1 张参考图 + 前缀布局与缓存时位级一致
+**2. 复制补丁文件**（来自本仓库 `patch/`）：
+
+```bat
+copy /y patch\qwen3vl.py E:\ai\ComfyUI_windows_portable\ComfyUI\comfy\text_encoders\qwen3vl.py
+copy /y patch\llama.py   E:\ai\ComfyUI_windows_portable\ComfyUI\comfy\text_encoders\llama.py
+```
+
+> `qwen35.py` 未改动，无需复制（仓库内保留仅为完整性）。
+
+**3. 校验语法**（可选但推荐）：
+
+```bat
+E:\ai\ComfyUI_windows_portable\python_embeded\python.exe -m py_compile E:\ai\ComfyUI_windows_portable\ComfyUI\comfy\text_encoders\qwen3vl.py E:\ai\ComfyUI_windows_portable\ComfyUI\comfy\text_encoders\llama.py
+```
+
+**4. 重启 ComfyUI / h3_runner**（必须——Python 模块已加载进内存，不重启不生效）。
+
+## 使用
+
+### 开启（默认关闭，三选一）
+
+**方式 A —— 系统环境变量（永久）**：
+```bat
+setx QWEN3VL_KV_CACHE 1
+```
+（`setx` 后需重开终端/重启 ComfyUI；改回关闭用 `setx QWEN3VL_KV_CACHE 0`）
+
+**方式 B —— 启动脚本内设置（推荐，仅对本次启动生效）**：
+```bat
+:: start_comfyui_persist.bat 开头加一行
+set QWEN3VL_KV_CACHE=1
+```
+
+**方式 C —— 命令行临时**：
+```bat
+set QWEN3VL_KV_CACHE=1 && E:\ai\ComfyUI_windows_portable\python_embeded\python.exe E:\ai\h3_runner.py ...
+```
+
+### 运行预期（看日志）
+
+**第一段（MISS，自动保存缓存）**：
+```
+[KV-CACHE] MISS 465bf725..._7_1_80_142_1_78_54_1_80_106 start=7 end=6044 -> will save
+[KV-CACHE] saved 465bf725... (50 layers, per-layer files)
+```
+编码耗时 ~325s（全量）。
+
+**段 2+（HIT，first_frame 变化不影响）**：
+```
+[KV-CACHE] HIT 465bf725... start=7 end=6044
+```
+编码耗时 ~224s（省 102s）。输出与无缓存**位级一致**（0.000e+00）。
+
+### 缓存维护
+
+- 位置：`E:\ai\h3_kv_cache\<key>\00.pt … 49.pt`（每个 key 一个目录，每层一个文件 ~70MB）
+- 首次 MISS 后生成；同一组参考图跨段复用
+- **换参考图 → 新 key**（MISS 重建，旧 key 成死数据）——手动删除旧目录释放磁盘：
+  ```bat
+  rmdir /s /q E:\ai\h3_kv_cache\<旧key目录>
+  ```
+- 旧格式单文件缓存（`<key>.pt`，v1 时代遗留）已作废，可整体删除：`del E:\ai\h3_kv_cache\*.pt`
+
+### 关闭
+
+取消环境变量后重启即可：`setx QWEN3VL_KV_CACHE 0`（或删除启动脚本里的 `set` 行）。未设置时代码行为与官方完全一致（零侵入）。
+
+### 回滚
+
+```bat
+cd /d E:\ai\ComfyUI_windows_portable\ComfyUI\comfy\text_encoders
+copy /y qwen3vl.py.bak_kvcache qwen3vl.py
+copy /y llama.py.bak_kvcache llama.py
+rmdir /s /q E:\ai\h3_kv_cache   :: 可选，删缓存
+:: 重启 ComfyUI
+```
+
+## 故障排查
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| 日志无 `[KV-CACHE]` | 环境变量未设置 / 未重启 | 确认 `QWEN3VL_KV_CACHE=1` 且重启 |
+| 一直 MISS | 参考图换了 / 前缀布局变了 | 正常（新 key）；确认旧缓存已删 |
+| HIT 但耗时不降 | 内存不足触发 swap（可用 <10GB 时整包加载曾导致）| v2 已修复（逐层加载 +70MB）；仍异常则检查是否有其他进程占内存 |
+| `size mismatch` 加载报错 | 用了非量化加载路径（测试脚本直接构造 ClipModel）| 必须经 `llama_detect` + `te()` 量化加载路径（见 docs）|
 
 ## 目录结构
 
