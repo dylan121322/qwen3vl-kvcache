@@ -61,6 +61,8 @@ H3 的 tokenize 布局（`minimax.py`）：
 - key = `md5(区间 embeds 字节) + start + 固定 ref 图 grid 摘要`；
 - 段 1（纯 3 ref 无 first_frame）也排除第 3 张（无法区分"末图是否 first_frame"）→ 少缓存 1/3，~30-40s，每部电影一次，可接受。
 
+> **first_frame 约定**：该区间语义基于 H3 布局（first_frame 总是序列最后一张图）。若使用场景布局不同（末图非关键帧、多关键帧、关键帧置首等），可修改 `_image_kv_cache_key` 中的 `end = images[-1]["index"]` 调整"哪些图进入缓存区间"——区间内内容不变即命中，与区间后内容无关。
+
 ### 3.4 缓存内容
 
 每个 key 一个文件（torch.save）：`{"kv": [...], "h": [...]}`

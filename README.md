@@ -36,6 +36,27 @@ H3 布局: [固定前缀 + 图1..图N-1] [first_frame] [prompt]
 - **损坏缓存回退**：逐层加载失败抛 `CacheCorruptError` → 删除坏缓存目录 → 本次走普通路径，不崩溃；
 - **原子写盘**：每层文件 tmp + rename，防半写文件。
 
+## 关于 first_frame（重要约定）
+
+- `first_frame` 是 H3 多段视频生成的**首帧关键帧**：段 2+ 把上一段的末帧作为本段起始帧传入 CLIP（FL2VA 关键帧模式），保证段间画面衔接。
+- **它每段都不同**（每段是上一段的末帧），所以无法缓存、每次重算。
+- **缓存区间 = 前 N-1 张图（排除末图）**——该设计基于 H3 的布局约定：**first_frame 总是序列中最后一张图**（`also_ref_first_frame` 把首帧追加为最后一个 Picture）。
+- 参考图（前 N-1 张）跨段不变 → 独立缓存 → 每段命中。
+
+**如果你的使用场景布局不同**（例如：末图不是 first_frame、多个 first_frame、first_frame 置首/居中、或根本没有关键帧概念），可自行调整 `qwen3vl.py` 中 `_image_kv_cache_key` 的区间选择：
+
+```python
+# 当前：排除最后一张图（H3 first_frame 约定）
+end = images[-1]["index"]
+
+# 例：全部图都固定（无 first_frame）→ 缓存全部图区间
+end = max(e["index"] + e["size"] for e in images)
+
+# 例：前 2 张固定、其余可变 → end = images[1]["index"] + images[1]["size"]
+```
+
+> 注意：区间后的一切（未缓存图 + 文本）每次重算且依赖缓存区间的 KV——只要"区间内内容不变"就能命中，与区间后内容无关。
+
 ## 安装
 
 ### 前置条件
