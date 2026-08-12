@@ -8,7 +8,7 @@ from transformers import Qwen2Tokenizer
 from comfy import sd1_clip
 import comfy.text_encoders.qwen_vl
 from .qwen35 import Qwen35VisionModel
-from .llama import BaseLlama, BaseQwen3, BaseGenerate, Llama2_, Qwen3VL_4BConfig, Qwen3VL_8BConfig, Qwen3VL_32BConfig
+from .llama import BaseLlama, BaseQwen3, BaseGenerate, Llama2_, CacheCorruptError, Qwen3VL_4BConfig, Qwen3VL_8BConfig, Qwen3VL_32BConfig
 
 
 QWEN3VL_VISION = {
@@ -74,32 +74,55 @@ except Exception:
     pass
 
 
-def _image_kv_cache_key(embeds, embeds_info):
+_KV_CACHE_SCHEMA = "v2"  # 缓存 key 格式版本：布局/语义变化时递增（旧缓存自动作废）
+
+
+def _image_kv_cache_key(embeds, embeds_info, config_fp=""):
     """返回 (key, start, end)：缓存区间 = 首图 start 到【倒数第二张图】end（含图间文本）。
     排除最后一张图（H3 的 first_frame 关键帧总是最后且每段变化）：其每次重算，
     前 N-1 张固定 ref 图独立缓存 → first_frame 变化不破坏命中。
-    单图/无图 → None（无可缓存的固定部分）。"""
-    images = sorted([e for e in embeds_info if e.get("type") == "image"], key=lambda e: e["index"])
-    if len(images) < 2:
+    key = schema + config 指纹 + md5(embeds[0:end] 含前缀) + start + end + grid 摘要：
+      - 含前缀：前缀同长改写（模板/标签变化）→ 新 key，防静默陈旧命中
+      - 含 end：末图（ff）尺寸变化 → 新 key，防区间错位
+      - 含 config 指纹：模型配置/代码版本变化 → 新 key，防陈旧复用
+    单图/无图/batch>1/计算异常 → None（不缓存，回退普通路径）。"""
+    try:
+        images = sorted([e for e in embeds_info if e.get("type") == "image"], key=lambda e: e["index"])
+        if len(images) < 2 or embeds.shape[0] != 1:
+            return None
+        start = min(e["index"] for e in images)
+        end = images[-1]["index"]  # 末图（first_frame）在缓存区间外
+        if end <= start:
+            return None
+        seg = embeds[0, :end].detach().cpu().numpy().tobytes()  # 前缀 + 区间（覆盖前缀因果依赖）
+        h = _khash.md5(seg).hexdigest()[:16]
+        fixed = images[:-1]  # key 只含固定 ref 图
+        extras = [e.get("extra") for e in fixed]
+        if all(x is None for x in extras):
+            grid_str = "nogrid"
+        else:
+            grid_str = "_".join(
+                str(int(v))
+                for e in fixed
+                for g in ((e["extra"]["grid"] if isinstance(e["extra"], dict) else e["extra"]) if e.get("extra") is not None else [])
+                for v in g
+            )
+        return f"{_KV_CACHE_SCHEMA}_{config_fp}_{h}_{start}_{end}_{grid_str}", start, end
+    except Exception as e:
+        print(f"[KV-CACHE] key calc error, cache disabled: {e}")
         return None
-    start = min(e["index"] for e in images)
-    end = images[-1]["index"]  # 末图（first_frame）在缓存区间外
-    if end <= start:
-        return None
-    seg = embeds[0, start:end].detach().cpu().numpy().tobytes()
-    h = _khash.md5(seg).hexdigest()[:16]
-    fixed = images[:-1]  # key 只含固定 ref 图
-    extras = [e.get("extra") for e in fixed]
-    if all(x is None for x in extras):
-        grid_str = "nogrid"
-    else:
-        grid_str = "_".join(
-            str(int(v))
-            for e in fixed
-            for g in ((e["extra"]["grid"] if isinstance(e["extra"], dict) else e["extra"]) if e.get("extra") is not None else [])
-            for v in g
-        )
-    return f"{h}_{start}_{grid_str}", start, end
+
+
+def _image_kv_cache_clear(key):
+    """删除损坏的缓存 key 目录（下次 MISS 重建）。"""
+    if not key:
+        return
+    layer_dir = os.path.join(_image_kv_cache_dir, key)
+    try:
+        import shutil as _sh
+        _sh.rmtree(layer_dir, ignore_errors=True)
+    except Exception:
+        pass
 
 
 def _image_kv_cache_load(key):
@@ -108,7 +131,7 @@ def _image_kv_cache_load(key):
     if not os.path.isdir(layer_dir):
         return None
     try:
-        files = sorted(os.listdir(layer_dir))
+        files = sorted(os.listdir(layer_dir), key=lambda f: int(f.split(".")[0]))
         return [os.path.join(layer_dir, f) for f in files]
     except Exception as e:
         print(f"[KV-CACHE] load error: {e}")
@@ -121,7 +144,9 @@ def _image_kv_cache_save(key, kv_layers, h_layers):
     try:
         os.makedirs(layer_dir, exist_ok=True)
         for i, ((k, v), h) in enumerate(zip(kv_layers, h_layers)):
-            torch.save({"k": k, "v": v, "h": h}, os.path.join(layer_dir, f"{i:02d}.pt"))
+            fp = os.path.join(layer_dir, f"{i:02d}.pt")
+            torch.save({"k": k, "v": v, "h": h}, fp + ".tmp")
+            os.replace(fp + ".tmp", fp)  # 原子替换，防半写文件
         print(f"[KV-CACHE] saved {key} ({len(kv_layers)} layers, per-layer files)")
     except Exception as e:
         print(f"[KV-CACHE] save error: {e}")
@@ -206,7 +231,8 @@ class Qwen3VL(BaseLlama, BaseQwen3, BaseGenerate, torch.nn.Module):
             position_ids, visual_pos_masks, deepstack_embeds = self.build_image_inputs(embeds, embeds_info)
         # 【图片 KV 缓存】prefill（embeds 全量且含图）自动管理：命中 → 分段复用；未命中 → 保存
         if _QWEN3VL_KV_CACHE_ENABLED and embeds is not None and len(embeds_info) > 0 and kv_restore is None and save_image_kv is None:
-            kv_info = _image_kv_cache_key(embeds, embeds_info)
+            kv_info = _image_kv_cache_key(embeds, embeds_info,
+                                        config_fp=f"h{self.model.config.hidden_size}_l{self.num_layers}_k{self.model.config.num_key_value_heads}_d{self.model.config.head_dim}")
             if kv_info is not None:
                 key, start, end = kv_info
                 files = _image_kv_cache_load(key)
@@ -232,30 +258,55 @@ class Qwen3VL(BaseLlama, BaseQwen3, BaseGenerate, torch.nn.Module):
                     for _ in range(self.num_layers)
                 ]
             kwargs["past_key_values"] = past_key_values
-        out = self.model(
-            input_ids,
-            attention_mask=attention_mask,
-            embeds=embeds,
-            num_tokens=num_tokens,
-            intermediate_output=intermediate_output,
-            final_layer_norm_intermediate=final_layer_norm_intermediate,
-            dtype=dtype,
-            position_ids=position_ids,
-            embeds_info=embeds_info,
-            visual_pos_masks=visual_pos_masks,
-            deepstack_embeds=deepstack_embeds,
-            kv_restore=kv_restore,
-            save_image_kv=save_image_kv,
-            **kwargs,
-        )
+        try:
+            out = self.model(
+                input_ids,
+                attention_mask=attention_mask,
+                embeds=embeds,
+                num_tokens=num_tokens,
+                intermediate_output=intermediate_output,
+                final_layer_norm_intermediate=final_layer_norm_intermediate,
+                dtype=dtype,
+                position_ids=position_ids,
+                embeds_info=embeds_info,
+                visual_pos_masks=visual_pos_masks,
+                deepstack_embeds=deepstack_embeds,
+                kv_restore=kv_restore,
+                save_image_kv=save_image_kv,
+                **kwargs,
+            )
+        except CacheCorruptError:
+            # 缓存文件损坏/半写：删除该 key 目录，回退普通路径（本次不缓存，下次 MISS 重建）
+            print(f"[KV-CACHE] corrupt cache {kv_restore[1] if kv_restore is not None else ''}, fallback to plain forward")
+            if kv_restore is not None:
+                _image_kv_cache_clear(kv_restore[2] if len(kv_restore) > 2 else None)
+            kv_restore = None
+            out = self.model(
+                input_ids,
+                attention_mask=attention_mask,
+                embeds=embeds,
+                num_tokens=num_tokens,
+                intermediate_output=intermediate_output,
+                final_layer_norm_intermediate=final_layer_norm_intermediate,
+                dtype=dtype,
+                position_ids=position_ids,
+                embeds_info=embeds_info,
+                visual_pos_masks=visual_pos_masks,
+                deepstack_embeds=deepstack_embeds,
+                kv_restore=None,
+                save_image_kv=None,
+                **kwargs,
+            )
         # encode 路径（SDClipModel）期待 (z, intermediate) 二元组；带 KV 时为 3 元组（KV 已存 _saved_image_kv）
         if (save_image_kv is not None or kv_restore is not None) and isinstance(out, tuple) and len(out) == 3:
             out = out[:2]
         if save_image_kv is not None:
-            saved = getattr(self.model, "_saved_image_kv", None)
-            if saved is not None and saved[0] == save_image_kv[2]:
-                _image_kv_cache_save(saved[0], saved[1], saved[2])
-            self.model._saved_image_kv = None
+            try:
+                saved = getattr(self.model, "_saved_image_kv", None)
+                if saved is not None and saved[0] == save_image_kv[2]:
+                    _image_kv_cache_save(saved[0], saved[1], saved[2])
+            finally:
+                self.model._saved_image_kv = None  # 异常路径也清理，防多 GB 张量滞留
         return out
 
 
@@ -282,7 +333,8 @@ class Qwen3VLClipModel(sd1_clip.SDClipModel):
 
         image_kv_restore = None
         image_kv_save = None
-        kv_info = _image_kv_cache_key(embeds, embeds_info) if _QWEN3VL_KV_CACHE_ENABLED else None
+        kv_info = _image_kv_cache_key(embeds, embeds_info,
+                                      config_fp=f"h{self.transformer.model.config.hidden_size}_l{self.transformer.num_layers}_k{self.transformer.model.config.num_key_value_heads}_d{self.transformer.model.config.head_dim}") if _QWEN3VL_KV_CACHE_ENABLED else None
         if kv_info is not None:
             key, start, end = kv_info
             files = _image_kv_cache_load(key)
@@ -295,15 +347,27 @@ class Qwen3VLClipModel(sd1_clip.SDClipModel):
             else:
                 image_kv_save = (start, end, key)
 
-        out = self.transformer.generate(embeds, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed,
-                                         presence_penalty=presence_penalty, position_ids=position_ids,
-                                         visual_pos_masks=visual_pos_masks, deepstack_embeds=deepstack,
-                                         image_kv_restore=image_kv_restore, image_kv_save=image_kv_save)
+        try:
+            out = self.transformer.generate(embeds, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed,
+                                             presence_penalty=presence_penalty, position_ids=position_ids,
+                                             visual_pos_masks=visual_pos_masks, deepstack_embeds=deepstack,
+                                             image_kv_restore=image_kv_restore, image_kv_save=image_kv_save)
+        except CacheCorruptError:
+            print(f"[KV-CACHE] corrupt cache, fallback to plain generate")
+            if image_kv_restore is not None:
+                _image_kv_cache_clear(image_kv_restore[2])
+            image_kv_restore = None
+            out = self.transformer.generate(embeds, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed,
+                                             presence_penalty=presence_penalty, position_ids=position_ids,
+                                             visual_pos_masks=visual_pos_masks, deepstack_embeds=deepstack,
+                                             image_kv_restore=None, image_kv_save=None)
         if image_kv_save is not None:
-            saved = getattr(self.transformer.model, "_saved_image_kv", None)
-            if saved is not None and saved[0] == image_kv_save[2]:
-                _image_kv_cache_save(saved[0], saved[1], saved[2])
-            self.transformer.model._saved_image_kv = None
+            try:
+                saved = getattr(self.transformer.model, "_saved_image_kv", None)
+                if saved is not None and saved[0] == image_kv_save[2]:
+                    _image_kv_cache_save(saved[0], saved[1], saved[2])
+            finally:
+                self.transformer.model._saved_image_kv = None
         return out
 
 

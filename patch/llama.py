@@ -761,6 +761,10 @@ def _make_scaled_embedding(ops, vocab_size, hidden_size, scale, device, dtype):
     return ScaledEmbedding(vocab_size, hidden_size, device=device, dtype=dtype)
 
 
+class CacheCorruptError(Exception):
+    """图片 KV 缓存文件损坏/半写：逐层加载失败时抛出，Qwen3VL.forward/generate 捕获后回退普通路径。"""
+
+
 class Llama2_(nn.Module):
     def __init__(self, config, device=None, dtype=None, ops=None):
         super().__init__()
@@ -872,9 +876,13 @@ class Llama2_(nn.Module):
             layer_k = layer_v = layer_h = None
             if segmented:
                 if seg_files_mode:
-                    data = torch.load(seg_src[i], map_location="cpu", weights_only=True)
-                    layer_k, layer_v, layer_h = data["k"], data["v"], data["h"]
-                    del data
+                    try:
+                        data = torch.load(seg_src[i], map_location="cpu", weights_only=True)
+                        layer_k, layer_v, layer_h = data["k"], data["v"], data["h"]
+                        del data
+                    except Exception as e:
+                        print(f"[KV-CACHE] layer file corrupt ({seg_src[i]}): {e}")
+                        raise CacheCorruptError(seg_src[i])
                 else:
                     layer_k, layer_v = seg_src[i][0]
                     layer_h = seg_src[i][1]
@@ -904,9 +912,20 @@ class Llama2_(nn.Module):
                 next_key_values.append(current_kv)
 
             # DeepStack: add per-layer visual features into the first len() decoder layers at image positions (Qwen3-VL)
-            # 分段复用路径跳过注入：缓存的图 hidden 已包含 deepstack 特征
-            if not segmented and deepstack_embeds is not None and i < len(deepstack_embeds):
-                x[visual_pos_masks] = x[visual_pos_masks] + deepstack_embeds[i].to(x)
+            # 分段复用路径：缓存区间（前 N-1 图）的 hidden 已含 deepstack 特征 → 跳过；
+            # 区间外（first_frame 等重算位置）照常注入（否则 HIT 与 MISS 在 ff 行输出不同）
+            if deepstack_embeds is not None and i < len(deepstack_embeds):
+                if segmented:
+                    # deepstack_embeds 按图片顺序排列：区间内（前 N-1 图）跳过（缓存 h 已含），
+                    # 区间外（first_frame 等）取后半段特征照常注入
+                    ds_mask = visual_pos_masks.clone()
+                    ds_mask[:, seg_start:seg_end] = False
+                    n_in = int(visual_pos_masks[:, seg_start:seg_end].sum())
+                    ds_i = deepstack_embeds[i]
+                    ds_rest = ds_i[n_in:] if ds_i.dim() == 2 else ds_i[:, n_in:]  # (num_tokens, H) 或 (1, num_tokens, H)
+                    x[ds_mask] = x[ds_mask] + ds_rest.to(x)
+                else:
+                    x[visual_pos_masks] = x[visual_pos_masks] + deepstack_embeds[i].to(x)
 
             # 分段复用：图区间输出直接取缓存（其计算已在前一次 prefill 完成）；h 暂存供下一层作输入
             if segmented and not is_last_layer:
