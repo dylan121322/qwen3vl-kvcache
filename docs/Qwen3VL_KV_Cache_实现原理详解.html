@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Qwen3VL 图片 KV 缓存 — 实现原理详解</title>
+<style>
+  :root {
+    --bg: #f7f8fa; --card: #ffffff; --border: #e3e6eb; --text: #1f2430;
+    --muted: #6b7280; --accent: #2563eb; --accent-soft: #eff6ff;
+    --green: #059669; --green-soft: #ecfdf5; --red: #dc2626; --red-soft: #fef2f2;
+    --amber: #b45309; --amber-soft: #fffbeb;
+    --code-bg: #0f172a; --code-fg: #e2e8f0;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; line-height: 1.7; padding-bottom: 80px; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+  header.hero { background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 60%, #3b82f6 100%); color: #fff; padding: 48px 0 40px; margin-bottom: 32px; }
+  header.hero h1 { font-size: 30px; font-weight: 700; }
+  header.hero .sub { margin-top: 10px; opacity: .9; font-size: 15px; }
+  header.hero .meta { margin-top: 16px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .chip { background: rgba(255,255,255,.15); border: 1px solid rgba(255,255,255,.25); padding: 3px 12px; border-radius: 999px; font-size: 12.5px; }
+  nav.toc { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 18px 22px; margin-bottom: 32px; }
+  nav.toc h2 { font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
+  nav.toc ol { padding-left: 20px; columns: 2; column-gap: 40px; }
+  nav.toc a { color: var(--accent); text-decoration: none; font-size: 14px; }
+  nav.toc a:hover { text-decoration: underline; }
+  section { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 28px 30px; margin-bottom: 24px; }
+  h2.sec { font-size: 21px; margin-bottom: 4px; display: flex; align-items: center; gap: 10px; }
+  h2.sec .no { background: var(--accent); color: #fff; width: 30px; height: 30px; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; font-size: 15px; flex-shrink: 0; }
+  h3 { font-size: 16.5px; margin: 26px 0 10px; }
+  h3::before { content: "▍"; color: var(--accent); margin-right: 6px; }
+  p { margin: 8px 0; font-size: 14.5px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  ul, ol { margin: 8px 0 8px 22px; font-size: 14.5px; }
+  li { margin: 4px 0; }
+  code { background: #eef1f5; border-radius: 4px; padding: 1px 6px; font-family: "SF Mono", Consolas, monospace; font-size: 13px; }
+  pre { background: var(--code-bg); color: var(--code-fg); border-radius: 10px; padding: 16px 18px; overflow-x: auto; font-size: 13px; line-height: 1.6; font-family: "SF Mono", Consolas, monospace; margin: 12px 0; }
+  pre .c { color: #94a3b8; }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13.5px; }
+  th { background: #f1f5f9; text-align: left; padding: 9px 12px; border: 1px solid var(--border); font-weight: 600; }
+  td { padding: 8px 12px; border: 1px solid var(--border); vertical-align: top; }
+  tr:nth-child(even) td { background: #fafbfc; }
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin: 16px 0; }
+  .stat { background: var(--accent-soft); border: 1px solid #dbeafe; border-radius: 10px; padding: 14px 16px; }
+  .stat .v { font-size: 24px; font-weight: 700; color: var(--accent); }
+  .stat .l { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+  .stat.green { background: var(--green-soft); border-color: #d1fae5; } .stat.green .v { color: var(--green); }
+  .stat.red { background: var(--red-soft); border-color: #fee2e2; } .stat.red .v { color: var(--red); }
+  .callout { border-left: 4px solid var(--accent); background: var(--accent-soft); padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 14px 0; font-size: 14px; }
+  .callout.warn { border-color: var(--amber); background: var(--amber-soft); }
+  .callout.red { border-color: var(--red); background: var(--red-soft); }
+  .callout.green { border-color: var(--green); background: var(--green-soft); }
+  .seq { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0; }
+  .seq .seg { border-radius: 8px; padding: 10px 12px; font-size: 12px; line-height: 1.5; }
+  .seq .tpl { background: #e0e7ff; border: 1px solid #c7d2fe; }
+  .seq .ref { background: #d1fae5; border: 1px solid #a7f3d0; }
+  .seq .var { background: #fef3c7; border: 1px solid #fde68a; }
+  .seq .prompt { background: #fee2e2; border: 1px solid #fecaca; }
+  .legend { display: flex; gap: 16px; font-size: 12.5px; color: var(--muted); margin-top: 8px; flex-wrap: wrap; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+  .flow { display: flex; flex-direction: column; align-items: center; gap: 0; margin: 18px 0; }
+  .fbox { border: 1.5px solid var(--accent); border-radius: 10px; padding: 12px 18px; background: #fff; font-size: 13.5px; width: 92%; max-width: 560px; text-align: left; }
+  .fbox.gray { border-color: #9ca3af; background: #f9fafb; }
+  .fbox.green { border-color: var(--green); background: var(--green-soft); }
+  .fbox.amber { border-color: var(--amber); background: var(--amber-soft); }
+  .fbox .t { font-weight: 600; margin-bottom: 4px; }
+  .fbox .d { font-size: 12.5px; color: var(--muted); }
+  .arrow { color: var(--accent); font-size: 18px; line-height: 1.2; padding: 2px 0; }
+  .bar-row { display: grid; grid-template-columns: 110px 1fr 70px; align-items: center; gap: 10px; margin: 8px 0; font-size: 13px; }
+  .bar-row .label { text-align: right; color: var(--muted); }
+  .bar-track { background: #eef1f5; border-radius: 6px; height: 26px; position: relative; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 6px; display: flex; align-items: center; }
+  .bar-fill .b-label { font-size: 11px; color: #fff; padding-left: 8px; font-weight: 600; white-space: nowrap; }
+  .bar-row .val { font-weight: 600; }
+  footer { text-align: center; color: var(--muted); font-size: 12.5px; margin-top: 32px; }
+  @media (max-width: 720px) { nav.toc ol { columns: 1; } .seq .seg { width: 100%; } }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <h1>Qwen3VL 图片 KV 缓存 — 实现原理详解</h1>
+    <div class="sub">MiniMax H3 视频生成的 conditioning 编码器（Qwen3-VL-32B，CPU）重复编码优化 · v2（拆层存储）</div>
+    <div class="meta">
+      <span class="chip">2026-08-12</span>
+      <span class="chip">50 层 Llama / hidden 5120</span>
+      <span class="chip">nvfp4 量化 · CPU 推理</span>
+      <span class="chip">输出位级一致 0.000e+00</span>
+      <span class="chip">实测提速 31%</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+<nav class="toc">
+  <h2>目录</h2>
+  <ol>
+    <li><a href="#s1">背景：H3 每段都要重新编码</a></li>
+    <li><a href="#s2">瓶颈分析：耗时都花在哪</a></li>
+    <li><a href="#s3">核心洞察：为什么图片 KV 可以缓存</a></li>
+    <li><a href="#s4">关键约束：为什么不能逐图独立缓存</a></li>
+    <li><a href="#s5">缓存设计：区间、key、拆层存储</a></li>
+    <li><a href="#s6">命中路径：分段 prefill 的实现</a></li>
+    <li><a href="#s7">未命中路径：KV 的保存</a></li>
+    <li><a href="#s8">v2 修复：swap 之谜与逐层加载</a></li>
+    <li><a href="#s9">验证结果：合成 + 真实 32B</a></li>
+    <li><a href="#s10">开关与限制</a></li>
+  </ol>
+</nav>
+
+<!-- 1. 背景 -->
+<section id="s1">
+  <h2 class="sec"><span class="no">1</span>背景：H3 每段都要重新编码</h2>
+  <p>MiniMax H3 视频生成中，每一段视频的 conditioning 都由 <b>Qwen3-VL-32B</b> 文本编码器生成——它把 <b>prompt + 参考图</b> 混合编码为一组 hidden states，喂给视频扩散模型（DiT）。32B 模型在 16GB 显存的机器上放不下，只能 <b>CPU 推理</b>。</p>
+  <div class="seq">
+    <div class="seg tpl">模板/标签</div>
+    <div class="seg ref">图 1 视觉块</div>
+    <div class="seg ref">图 2 视觉块</div>
+    <div class="seg ref">图 3 视觉块</div>
+    <div class="seg var">first_frame 块<br><span class="muted">每段变化</span></div>
+    <div class="seg prompt">prompt 文本<br><span class="muted">每段不同</span></div>
+  </div>
+  <div class="legend">
+    <span><i class="dot" style="background:#e0e7ff"></i>固定模板</span>
+    <span><i class="dot" style="background:#d1fae5"></i>参考图（跨段不变）</span>
+    <span><i class="dot" style="background:#fef3c7"></i>关键帧（每段新）</span>
+    <span><i class="dot" style="background:#fee2e2"></i>prompt（每段不同）</span>
+  </div>
+  <p>问题：参考图跨段不变，但 LLM 每段把整条混合序列重新前向一遍——图片 token 占序列 90%+，计算大量重复。已有 VIT 缓存只省视觉编码器，<b>LLM 50 层前向仍是主耗时</b>（单段 ~5 分钟）。</p>
+</section>
+
+<!-- 2. 瓶颈分析 -->
+<section id="s2">
+  <h2 class="sec"><span class="no">2</span>瓶颈分析：耗时都花在哪</h2>
+  <div class="bar-row"><span class="label">纯文本 20 token</span><div class="bar-track"><div class="bar-fill" style="width:31%;background:#9ca3af"><span class="b-label">25.4s</span></div></div><span class="val">25.4s</span></div>
+  <div class="bar-row"><span class="label">纯文本 200 token</span><div class="bar-track"><div class="bar-fill" style="width:36%;background:#9ca3af"><span class="b-label">29.3s</span></div></div><span class="val">29.3s</span></div>
+  <div class="bar-row"><span class="label">带 3 图（6029 token）</span><div class="bar-track"><div class="bar-fill" style="width:100%;background:#2563eb"><span class="b-label">325.8s</span></div></div><span class="val">325.8s</span></div>
+  <p>关键发现：<b>20 个 token 也要 25.4 秒</b>——nvfp4（4-bit）量化权重每次 forward 全量反量化（<code>weight.dequantize()</code>），50 层 × 15.7GB，与 token 数无关的固定成本。</p>
+  <div class="card-grid">
+    <div class="stat red"><div class="v">~25s</div><div class="l">固定成本：权重反量化（省不掉）</div></div>
+    <div class="stat"><div class="v">~300s</div><div class="l">token 计算：图 token 占 90%+（可优化）</div></div>
+    <div class="stat green"><div class="v">0.000e+00</div><div class="l">缓存复用的输出误差（位级一致）</div></div>
+  </div>
+</section>
+
+<!-- 3. 核心洞察 -->
+<section id="s3">
+  <h2 class="sec"><span class="no">3</span>核心洞察：为什么图片 KV 可以缓存</h2>
+  <ul>
+    <li><b>因果注意力</b>：`Llama2_.forward` 无条件构造 causal mask（<code>triu(1)</code>）——token 只能 attend 它前面的 token；</li>
+    <li><b>图片在 prompt 之前</b>：参考图块只 attend 固定的模板/标签文本与其他参考图；</li>
+    <li><b>mrope 位置固定</b>：图片区间的 3 维旋转位置编码只由 (start, grid) 决定，与后面的文本无关。</li>
+  </ul>
+  <pre><span class="c">// 层 l 的图 token 输出 = f(图 token 输入, 前缀 KV)</span>
+h<sub>img</sub>(l+1) = layer_l( h<sub>img</sub>(l),  KV<sub>前缀</sub>(l) )
+KV<sub>前缀</sub>(l) = f(模板, 图1..图N 特征)   <span class="c">← 跨段不变</span>
+→ h<sub>img</sub>(l) 与 KV<sub>img</sub>(l)  ⟂  first_frame / prompt</pre>
+  <div class="callout green">合成验证：同一组图、不同文本（长度也变），图区间的 KV 与每层输出 hidden <b>逐位一致（diff = 0）</b>——缓存是数学上成立的，不是近似。</div>
+</section>
+
+<!-- 4. 关键约束 -->
+<section id="s4">
+  <h2 class="sec"><span class="no">4</span>关键约束：为什么不能逐图独立缓存</h2>
+  <p>图 2 在 <b>layer 0</b> 的输入是自己的 embeds（可独立）；但 <b>layer 1+</b> 的输入 = 上一层输出，其中图 2 token 的 attention 输出来自它对<b>前缀 KV（含图 1）</b>的查询 → <b>图 2 的每一层 KV/hidden 都依赖图 1</b>。</p>
+  <div class="flow">
+    <div class="fbox green"><div class="t">图 1 区间 · 可缓存</div><div class="d">只依赖固定模板</div></div>
+    <div class="arrow">↓</div>
+    <div class="fbox amber"><div class="t">图 2 区间 · 依赖图 1</div><div class="d">key 必须含图 1 指纹 → 等价于前缀并入区间</div></div>
+    <div class="arrow">↓</div>
+    <div class="fbox amber"><div class="t">图 3 区间 · 依赖图 1 + 图 2</div><div class="d">逐图拆分无收益，只是文件更碎</div></div>
+  </div>
+  <p>推论：任何一张参考图变化 → 其后所有缓存<b>必然失效</b>（架构决定）；"固定段 + 可变段"二分就是<b>理论最大可缓存范围</b>。</p>
+</section>
+
+<!-- 5. 缓存设计 -->
+<section id="s5">
+  <h2 class="sec"><span class="no">5</span>缓存设计：区间、key、拆层存储</h2>
+  <h3>5.1 缓存区间：排除末图（first_frame 分离）</h3>
+  <p>缓存区间 = <code>[首图 start, 倒数第二图 end)</code> —— H3 约定 first_frame 总是最后一张（<code>also_ref_first_frame</code> 追加为最后 Picture）。<b>first_frame 每段变 → 重算；前 N-1 张固定 ref 图独立缓存 → 每段命中。</b>单图/无图 → 不缓存。</p>
+  <h3>5.2 key 设计</h3>
+  <pre>key = md5( 区间 embeds 字节 ) + "_" + start + "_" + ref 图 grid 摘要
+<span class="c">// 命中条件：前 N-1 张图 + 前缀布局位级一致；末图（ff）与 prompt 不在 key 中</span></pre>
+  <h3>5.3 缓存内容：KV + hidden 双份，拆层存储（v2）</h3>
+  <table>
+    <tr><th>字段</th><th>内容</th><th>单层大小</th></tr>
+    <tr><td><code>k / v</code></td><td>每层图区间 K/V（rope 后，最终形态）(1, 8, L, 128)</td><td>~10MB</td></tr>
+    <tr><td><code>h</code></td><td>每层图区间输出 hidden（deepstack 注入后）(1, L, 5120)</td><td>~60MB</td></tr>
+  </table>
+  <p>存储：<code>h3_kv_cache/&lt;key&gt;/00.pt … 49.pt</code>——<b>每层一个文件</b>，HIT 时逐层惰性加载、用完即弃，峰值内存仅单层 ~70MB（v2 核心改进，见 §8）。</p>
+</section>
+
+<!-- 6. 命中路径 -->
+<section id="s6">
+  <h2 class="sec"><span class="no">6</span>命中路径：分段 prefill 的实现</h2>
+  <div class="flow">
+    <div class="fbox gray"><div class="t">输入 x（全序列）</div><div class="d">图区间先填充缓存 h[i-1]（第 1 层除外，用真实 embeds）</div></div>
+    <div class="arrow">↓</div>
+    <div class="fbox"><div class="t">1 · 本层缓存按需加载（磁盘单层文件）</div><div class="d">k / v / h 三个张量，用完即弃</div></div>
+    <div class="arrow">↓</div>
+    <div class="fbox"><div class="t">2 · q/k/v 投影 —— 只对文本行</div><div class="d">前缀 [0, start) + 后缀 [end, seq)，图区间不投影</div></div>
+    <div class="arrow">↓</div>
+    <div class="fbox"><div class="t">3 · KV 组装</div><div class="d">cat( 前缀 KV, 缓存图 KV, 后缀 KV )</div></div>
+    <div class="arrow">↓</div>
+    <div class="fbox"><div class="t">4 · attention —— 优化内核（flash）</div><div class="d">文本行 q × 全 KV（cross-attention 语义）</div></div>
+    <div class="arrow">↓</div>
+    <div class="fbox"><div class="t">5 · 输出组装</div><div class="d">文本行 = 真值；图区间 = 缓存 h[i]；跳过 deepstack 注入</div></div>
+    <div class="arrow">↓</div>
+    <div class="fbox amber"><div class="t">最后一层 —— 不跳过</div><div class="d">conditioning 需要图区间 hidden 真值输出给 DiT → 全量计算（KV 与缓存位级一致）</div></div>
+  </div>
+  <pre><span class="c">// llama.py — Attention._forward_segmented（核心）</span>
+text_idx  = [0..start) ∪ [end..seq)
+xq/xk/xv  = proj(hidden[text_idx])                    <span class="c">// 图区间不投影</span>
+xk = cat( xk_text[:, :, :start], cached_k, xk_text[:, :, start:] )
+out = optimized_attention( xq, xk, xv, mask=seg_mask, enable_gqa=True )</pre>
+</section>
+
+<!-- 7. 未命中路径 -->
+<section id="s7">
+  <h2 class="sec"><span class="no">7</span>未命中路径：KV 的保存</h2>
+  <ul>
+    <li><b>自建 past_key_values</b>：encode 路径（SDClipModel）默认不传 past_key_values → Attention 不返回 KV。保存模式下由 <code>Qwen3VL.forward</code> 自建（batch=1，容量=序列长）；</li>
+    <li>每层 Attention 把 KV 写进预分配 cache 并回传 → slice 区间；层循环同时收集每层输出 hidden 的图区间；</li>
+    <li>拆层写盘（每层一个 <code>.pt</code>，原子替换）。</li>
+  </ul>
+  <div class="callout red">契约陷阱：带回 KV 后 <code>Llama2_.forward</code> 返回 3 元组，但 SDClipModel 把第 3 个元素当 pooled 输出解包 → 必须在 <code>Qwen3VL.forward</code> 还原成 2 元组（KV 已存入 <code>_saved_image_kv</code>）。</div>
+</section>
+
+<!-- 8. v2 修复 -->
+<section id="s8">
+  <h2 class="sec"><span class="no">8</span>v2 修复：swap 之谜与逐层加载</h2>
+  <p><b>现象</b>：v1 实装后 HIT 路径 CPU 利用率只有 ~60%，耗时与非缓存几乎相同——独立测试明明省了 92s。</p>
+  <p><b>根因</b>（数据链）：</p>
+  <table>
+    <tr><th>证据</th><th>值</th><th>指向</th></tr>
+    <tr><td>页面文件峰值</td><td><b>72.5GB</b></td><td>跑 H3 时内存爆 → swap</td></tr>
+    <tr><td>可用内存</td><td>3–8GB / 49GB</td><td>ComfyUI --lowvram 占 28GB</td></tr>
+    <tr><td>v1 HIT 加载</td><td>整包 torch.load 8.5GB 进内存</td><td>直接挤爆 → 换页</td></tr>
+  </table>
+  <p><b>机制</b>：CPU 拉不满 = 进程在<b>等内存换页</b>（数据被换到页面文件，等磁盘比等内存慢 100–1000 倍）。省下的计算时间被换页等待填满 → 耗时不变。这不是内存<b>带宽</b>饱和（那在反量化阶段是正常且高效的），而是<b>容量</b>不足导致的磁盘等待。</p>
+  <p><b>修复</b>：缓存<b>拆层存储 + 逐层惰性加载</b>——HIT 峰值内存 +8.5GB → <b>+70MB</b>，swap 不再被触发。</p>
+  <div class="callout green">修复后验证：MISS 325.8s → HIT 223.8s（省 102s，31%），输出位级一致——独立测试的收益在实装环境下稳定复现。</div>
+</section>
+
+<!-- 9. 验证结果 -->
+<section id="s9">
+  <h2 class="sec"><span class="no">9</span>验证结果：合成 + 真实 32B</h2>
+  <table>
+    <tr><th>层</th><th>方法</th><th>结果</th></tr>
+    <tr><td>合成小模型</td><td>4 层小 Llama2_（GQA/mrope/q/k_norm 结构保留）</td><td>KV 跨文本位级不变（0）；分段 vs 正常输出 4e-8（fp32）</td></tr>
+    <tr><td>真实 32B 单图</td><td>随机图 256 token</td><td>MISS vs HIT 输出 0.000e+00</td></tr>
+    <tr><td>真实 32B H3 三图</td><td>3 张微信参考图 + 中文 prompt</td><td>MISS 332.6s → HIT 201.3s；输出 0.000e+00</td></tr>
+    <tr><td>合成多图分离</td><td>2 ref 固定 + 末图变化</td><td>HIT 位级一致；ref 变 → key 变（MISS）；末图变 → key 不变（HIT）</td></tr>
+    <tr><td><b>真实段2 场景（v2）</b></td><td>3 ref 固定 + first_frame 每段变</td><td><b>MISS 325.8s → HIT 223.8s（省 102s，31%）</b>；z2 vs z3 = 0.000e+00</td></tr>
+  </table>
+  <div class="bar-row"><span class="label">MISS（全量）</span><div class="bar-track"><div class="bar-fill" style="width:100%;background:#dc2626"><span class="b-label">325.8s</span></div></div><span class="val">325.8s</span></div>
+  <div class="bar-row"><span class="label">HIT（缓存）</span><div class="bar-track"><div class="bar-fill" style="width:69%;background:#059669"><span class="b-label">223.8s</span></div></div><span class="val">223.8s</span></div>
+  <p class="muted">8 段视频约省 13 分钟；HIT 剩余耗时 = 反量化 ~25s（固定）+ first_frame 重算 + 最后一层全量 + 逐层加载。</p>
+</section>
+
+<!-- 10. 开关与限制 -->
+<section id="s10">
+  <h2 class="sec"><span class="no">10</span>开关与限制</h2>
+  <pre><span class="c"># Windows，默认关闭；启动 ComfyUI / h3_runner 前设置</span>
+set QWEN3VL_KV_CACHE=1
+<span class="c"># 未设置时代码行为与修改前完全一致（零侵入）</span></pre>
+  <ul>
+    <li><b>命中条件</b>：前 N-1 张图 embeds 位级一致（同图 + 同前缀布局 + 同 start）。ref 图/标签/顺序变化 → 新 key。</li>
+    <li><b>单图不缓存</b>；段 1（纯 3 ref）少缓存第 3 张（~30–40s，每部电影一次）。</li>
+    <li><b>旧格式作废</b>：v1 单文件缓存（<code>&lt;key&gt;.pt</code>）不命中，可删除（56GB）。</li>
+    <li><b>CPU 反量化固定成本未触及</b>（~25s/次）；进一步提速需 int8 权重（与 KV 缓存正交，且先保证内存充足）。</li>
+    <li><b>数值</b>：flash 分段路径与正常路径位级一致；原生 matmul fallback 差异 ~8e-5（bf16 噪声）。</li>
+    <li><b>生效</b>：改 <code>qwen3vl.py</code>/<code>llama.py</code> 后需重启进程。</li>
+  </ul>
+  <div class="callout">一句话总结：<b>因果注意力 + 图片在前 + 前缀固定 → 图区间每层 KV 与 hidden 独立于文本 → 缓存"固定段"（前 N-1 张参考图），重算"可变段"（first_frame + prompt），分段 prefill 只计算文本行，最后一层保持全量；拆层存储保证内存压力下收益不丢失。</b></div>
+</section>
+
+<footer>Qwen3VL 图片 KV 缓存实现原理 · v2（2026-08-12）· 基于 ComfyUI（GPL-3.0）comfy/text_encoders/{qwen3vl.py, llama.py} 修改</footer>
+
+</div>
+</body>
+</html>
