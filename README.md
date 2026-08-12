@@ -101,13 +101,13 @@ set QWEN3VL_KV_CACHE=1 && <ComfyUI根目录>\python_embeded\python.exe <h3_runne
 **第一段（MISS，自动保存缓存）**：
 ```
 [KV-CACHE] MISS <key> start=7 end=6044 -> will save
-[KV-CACHE] saved 465bf725... (50 layers, per-layer files)
+[KV-CACHE] saved <key> (50 layers, per-layer files)
 ```
 编码耗时 ~325s（全量）。
 
 **段 2+（HIT，first_frame 变化不影响）**：
 ```
-[KV-CACHE] HIT 465bf725... start=7 end=6044
+[KV-CACHE] HIT <key> start=7 end=6044
 ```
 编码耗时 ~224s（省 102s）。输出与无缓存**位级一致**（0.000e+00）。
 
