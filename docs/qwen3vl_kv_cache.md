@@ -109,7 +109,7 @@ L = 区间 token 数（3 ref 为 6037）。**缓存 h 是必需的**：condition
 |---|---|---|
 | 合成小模型 | 4 层小 Llama2_（GQA/mrope/q/k_norm 结构保留）| KV 跨文本位级不变（diff=0）；分段 vs 正常输出 4e-8（fp32）|
 | 真实 32B 单图 | 随机图 256 token | z1 vs z3 = 0.000e+00 |
-| 真实 32B H3 三图 | 3 张微信参考图 + 中文 prompt | MISS 332.6s → HIT 201.3s；z1 vs z3 = 0.000e+00 |
+| 真实 32B H3 三图 | 3 张参考图 + 中文 prompt | MISS 332.6s → HIT 201.3s；z1 vs z3 = 0.000e+00 |
 | 合成多图分离 | 3 图（2 ref 固定 + 末图变）| HIT 输出位级一致；ref 变 → key 变（MISS）；末图变 → key 不变（HIT）|
 | 真实段2 场景 | 3 ref 固定 + first_frame 每段变 | MISS 316.2s → HIT 224.5s；z2 vs z3 = 0.000e+00 |
 
