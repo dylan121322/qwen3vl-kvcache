@@ -84,7 +84,7 @@ def _image_kv_cache_key(embeds, embeds_info, config_fp=""):
     前 N-1 张固定 ref 图独立缓存 → first_frame 变化不破坏命中。
     key = schema + config 指纹 + md5(embeds[0:end] 含前缀) + start + end + grid 摘要：
       - 含前缀：前缀同长改写（模板/标签变化）→ 新 key，防静默陈旧命中
-      - 含 end：末图（ff）尺寸变化 → 新 key，防区间错位
+      - 含 end：末图起始 index 变化 → 新 key（ff 尺寸变化不影响 key——ff 总在区间外重算，安全）
       - 含 config 指纹：模型配置/代码版本变化 → 新 key，防陈旧复用
     单图/无图/batch>1/计算异常 → None（不缓存，回退普通路径）。"""
     try:
@@ -278,9 +278,9 @@ class Qwen3VL(BaseLlama, BaseQwen3, BaseGenerate, torch.nn.Module):
             )
         except CacheCorruptError:
             # 缓存文件损坏/半写：删除该 key 目录，回退普通路径（本次不缓存，下次 MISS 重建）
-            print(f"[KV-CACHE] corrupt cache {kv_restore[1] if kv_restore is not None else ''}, fallback to plain forward")
+            print(f"[KV-CACHE] corrupt cache, fallback to plain forward")
             if kv_restore is not None:
-                _image_kv_cache_clear(kv_restore[2] if len(kv_restore) > 2 else None)
+                _image_kv_cache_clear(key)
             kv_restore = None
             out = self.model(
                 input_ids,
@@ -356,7 +356,7 @@ class Qwen3VLClipModel(sd1_clip.SDClipModel):
         except CacheCorruptError:
             print(f"[KV-CACHE] corrupt cache, fallback to plain generate")
             if image_kv_restore is not None:
-                _image_kv_cache_clear(image_kv_restore[2])
+                _image_kv_cache_clear(key)
             image_kv_restore = None
             out = self.transformer.generate(embeds, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed,
                                              presence_penalty=presence_penalty, position_ids=position_ids,
