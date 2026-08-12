@@ -43,8 +43,8 @@ H3 布局: [固定前缀 + 图1..图N-1] [first_frame] [prompt]
 | 项 | 要求 |
 |---|---|
 | ComfyUI | Windows portable 版（2026-08-03 之后，含 MiniMax H3 节点支持）|
-| 环境路径 | `E:\ai\ComfyUI_windows_portable\`（本补丁按此路径开发验证）|
-| CLIP 权重 | `E:\ai\minimax_h3\text_encoders\qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors`（nvfp4 量化）|
+| 环境路径 | `<ComfyUI根目录>\`（本补丁按此路径开发验证）|
+| CLIP 权重 | `<H3权重路径>\qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors`（nvfp4 量化）|
 | Python | 使用 ComfyUI 自带的 `python_embeded\python.exe`，无需额外依赖 |
 
 ### 安装步骤
@@ -52,7 +52,7 @@ H3 布局: [固定前缀 + 图1..图N-1] [first_frame] [prompt]
 **1. 备份原文件**（重要——回滚靠它）：
 
 ```bat
-cd /d E:\ai\ComfyUI_windows_portable\ComfyUI\comfy\text_encoders
+cd /d <ComfyUI根目录>\ComfyUI\comfy\text_encoders
 copy /y qwen3vl.py qwen3vl.py.bak_kvcache
 copy /y llama.py llama.py.bak_kvcache
 copy /y qwen35.py qwen35.py.bak_kvcache
@@ -61,8 +61,8 @@ copy /y qwen35.py qwen35.py.bak_kvcache
 **2. 复制补丁文件**（来自本仓库 `patch/`）：
 
 ```bat
-copy /y patch\qwen3vl.py E:\ai\ComfyUI_windows_portable\ComfyUI\comfy\text_encoders\qwen3vl.py
-copy /y patch\llama.py   E:\ai\ComfyUI_windows_portable\ComfyUI\comfy\text_encoders\llama.py
+copy /y patch\qwen3vl.py <ComfyUI根目录>\ComfyUI\comfy\text_encoders\qwen3vl.py
+copy /y patch\llama.py   <ComfyUI根目录>\ComfyUI\comfy\text_encoders\llama.py
 ```
 
 > `qwen35.py` 未改动，无需复制（仓库内保留仅为完整性）。
@@ -70,7 +70,7 @@ copy /y patch\llama.py   E:\ai\ComfyUI_windows_portable\ComfyUI\comfy\text_encod
 **3. 校验语法**（可选但推荐）：
 
 ```bat
-E:\ai\ComfyUI_windows_portable\python_embeded\python.exe -m py_compile E:\ai\ComfyUI_windows_portable\ComfyUI\comfy\text_encoders\qwen3vl.py E:\ai\ComfyUI_windows_portable\ComfyUI\comfy\text_encoders\llama.py
+<ComfyUI根目录>\python_embeded\python.exe -m py_compile <ComfyUI根目录>\ComfyUI\comfy\text_encoders\qwen3vl.py <ComfyUI根目录>\ComfyUI\comfy\text_encoders\llama.py
 ```
 
 **4. 重启 ComfyUI / h3_runner**（必须——Python 模块已加载进内存，不重启不生效）。
@@ -93,7 +93,7 @@ set QWEN3VL_KV_CACHE=1
 
 **方式 C —— 命令行临时**：
 ```bat
-set QWEN3VL_KV_CACHE=1 && E:\ai\ComfyUI_windows_portable\python_embeded\python.exe E:\ai\h3_runner.py ...
+set QWEN3VL_KV_CACHE=1 && <ComfyUI根目录>\python_embeded\python.exe <h3_runner路径>\h3_runner.py ...
 ```
 
 ### 运行预期（看日志）
@@ -113,13 +113,13 @@ set QWEN3VL_KV_CACHE=1 && E:\ai\ComfyUI_windows_portable\python_embeded\python.e
 
 ### 缓存维护
 
-- 位置：`E:\ai\h3_kv_cache\<key>\00.pt … 49.pt`（每个 key 一个目录，每层一个文件 ~70MB）
+- 位置：`<缓存目录，默认 ComfyUI根目录\h3_kv_cache，可 set QWEN3VL_KV_CACHE_DIR 覆盖>\<key>\00.pt … 49.pt`（每个 key 一个目录，每层一个文件 ~70MB）
 - 首次 MISS 后生成；同一组参考图跨段复用
 - **换参考图 → 新 key**（MISS 重建，旧 key 成死数据）——手动删除旧目录释放磁盘：
   ```bat
-  rmdir /s /q E:\ai\h3_kv_cache\<旧key目录>
+  rmdir /s /q <缓存目录，默认 ComfyUI根目录\h3_kv_cache，可 set QWEN3VL_KV_CACHE_DIR 覆盖>\<旧key目录>
   ```
-- 旧格式单文件缓存（`<key>.pt`，v1 时代遗留）已作废，可整体删除：`del E:\ai\h3_kv_cache\*.pt`
+- 旧格式单文件缓存（`<key>.pt`，v1 时代遗留）已作废，可整体删除：`del <缓存目录，默认 ComfyUI根目录\h3_kv_cache，可 set QWEN3VL_KV_CACHE_DIR 覆盖>\*.pt`
 
 ### 关闭
 
@@ -128,10 +128,10 @@ set QWEN3VL_KV_CACHE=1 && E:\ai\ComfyUI_windows_portable\python_embeded\python.e
 ### 回滚
 
 ```bat
-cd /d E:\ai\ComfyUI_windows_portable\ComfyUI\comfy\text_encoders
+cd /d <ComfyUI根目录>\ComfyUI\comfy\text_encoders
 copy /y qwen3vl.py.bak_kvcache qwen3vl.py
 copy /y llama.py.bak_kvcache llama.py
-rmdir /s /q E:\ai\h3_kv_cache   :: 可选，删缓存
+rmdir /s /q <缓存目录，默认 ComfyUI根目录\h3_kv_cache，可 set QWEN3VL_KV_CACHE_DIR 覆盖>   :: 可选，删缓存
 :: 重启 ComfyUI
 ```
 

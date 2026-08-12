@@ -1,7 +1,7 @@
 # Qwen3VL 图片 KV 缓存 — 使用与维护文档
 
 > 2026-08-11（v2 重写）| 供其他 agent 使用
-> 涉及文件：`E:\ai\ComfyUI_windows_portable\ComfyUI\comfy\text_encoders\{qwen3vl.py, llama.py}`
+> 涉及文件：`<ComfyUI根目录>\ComfyUI\comfy\text_encoders\{qwen3vl.py, llama.py}`
 > 场景：MiniMax H3 视频生成的 conditioning CLIP（Qwen3-VL-32B，nvfp4 量化，CPU 推理）
 
 ## 1. 功能与实测收益
@@ -23,7 +23,7 @@ set QWEN3VL_KV_CACHE=1   # Windows，启动 ComfyUI / h3_runner 前设置
 
 - 默认关闭：未设置时行为与修改前完全一致（零侵入）。
 - 修改 `qwen3vl.py`/`llama.py` 后需**重启进程**生效。
-- 缓存目录：`E:\ai\h3_kv_cache`（~4.3GB/图组，手动清理，无自动淘汰）。
+- 缓存目录：`<缓存目录>（默认 ComfyUI根目录\h3_kv_cache，env QWEN3VL_KV_CACHE_DIR 可覆盖）`（~4.3GB/图组，手动清理，无自动淘汰）。
 
 ## 3. 工作原理
 
@@ -88,7 +88,7 @@ L = 区间 token 数（3 ref 为 6037）。**缓存 h 是必需的**：condition
 | 符号 | 说明 |
 |---|---|
 | `_QWEN3VL_KV_CACHE_ENABLED` | 开关：`QWEN3VL_KV_CACHE=1` |
-| `_image_kv_cache_dir` | `E:\ai\h3_kv_cache` |
+| `_image_kv_cache_dir` | `<缓存目录>（默认 ComfyUI根目录\h3_kv_cache，env QWEN3VL_KV_CACHE_DIR 可覆盖）` |
 | `_image_kv_cache_key(embeds, embeds_info)` | 返回 (key, start, end)；区间 = 首图 start → **倒数第二图 end**（排除末图=first_frame）；key = md5(区间 embeds) + start + ref grid；单图/无图 → None |
 | `_image_kv_cache_load / _image_kv_cache_save` | 磁盘读写 {"kv", "h"} |
 | `Qwen3VL.forward` | prefill 自动管理：HIT → `kv_restore=(start,end,kvs,hs)`；MISS → `save_image_kv`，返回后落盘；save 模式自建 past_key_values；带 KV 时 3 元组还原 2 元组（encode 路径契约：SDClipModel 把 outputs[2] 当 pooled） |
@@ -117,7 +117,7 @@ L = 区间 token 数（3 ref 为 6037）。**缓存 h 是必需的**：condition
 
 1. **命中条件**：缓存区间（前 N-1 图）embeds 位级一致（同图 + 同前缀布局 + 同 start）。ref 图/标签/顺序变化 → 新 key（MISS 重存）。末图（first_frame）变化不影响命中。
 2. **单图不缓存**；段1 只缓存前 2 张 ref（见 3.3）。
-3. **旧缓存作废**：2026-08-11 区间语义修改前的缓存 key 不匹配，清理 `E:\ai\h3_kv_cache` 旧文件。
+3. **旧缓存作废**：2026-08-11 区间语义修改前的缓存 key 不匹配，清理 `<缓存目录>（默认 ComfyUI根目录\h3_kv_cache，env QWEN3VL_KV_CACHE_DIR 可覆盖）` 旧文件。
 4. **CPU 瓶颈未触及**：nvfp4 权重每次 forward 反量化 ~25s 固定成本（纯文本 20 token 也 25.4s）。KV 缓存只省图 token 计算。进一步提速：int8 权重（与 KV 缓存正交）。
 5. **内存**：加载缓存 ~8.5GB；与模型（15.7GB 量化 + 反量化临时）共存注意峰值（48GB 机器实测可行）。
 6. **数值**：flash 分段路径与正常路径位级一致；若用原生 matmul fallback，差异 ~8e-5（bf16 噪声，可接受）。

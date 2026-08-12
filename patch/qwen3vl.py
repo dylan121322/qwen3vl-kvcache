@@ -26,7 +26,8 @@ QWEN3VL_CONFIGS = {"qwen3vl_4b": Qwen3VL_4BConfig, "qwen3vl_8b": Qwen3VL_8BConfi
 
 # 【2026-08-11】ViT 视觉编码缓存（磁盘持久化）：同图同尺寸只跑一次视觉编码器
 import os as _vos, hashlib as _vhash
-_vit_cache_dir = r"E:\ai\h3_vit_cache"
+_default_cache_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # ComfyUI 根目录
+_vit_cache_dir = os.environ.get("QWEN3VL_VIT_CACHE_DIR", os.path.join(_default_cache_root, "h3_vit_cache"))
 try:
     _vos.makedirs(_vit_cache_dir, exist_ok=True)
 except Exception:
@@ -67,7 +68,7 @@ import hashlib as _khash
 # 【开关】默认关闭：QWEN3VL_KV_CACHE=1 启用图片 KV 缓存（CPU 场景收益有限，默认不改变行为）
 _QWEN3VL_KV_CACHE_ENABLED = os.environ.get("QWEN3VL_KV_CACHE", "0") == "1"
 
-_image_kv_cache_dir = r"E:\ai\h3_kv_cache"
+_image_kv_cache_dir = os.environ.get("QWEN3VL_KV_CACHE_DIR", os.path.join(_default_cache_root, "h3_kv_cache"))
 try:
     os.makedirs(_image_kv_cache_dir, exist_ok=True)
 except Exception:
