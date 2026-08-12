@@ -57,6 +57,23 @@ end = max(e["index"] + e["size"] for e in images)
 
 > 注意：区间后的一切（未缓存图 + 文本）每次重算且依赖缓存区间的 KV——只要"区间内内容不变"就能命中，与区间后内容无关。
 
+## 段2 首次 HIT：占位图对齐方案（可选）
+
+**背景**：段1（3 ref 无 ff）的 n-1 排除会少缓存第 3 张 ref（模型无法区分"末图是固定 ref 还是 first_frame"）→ 段1 缓存 2 张、段2 缓存 3 张 → 段2 首次 MISS（一次性 ~3 分钟代价）。
+
+**方案**：段1 额外插入一张**占位图**作为第 4 张参考 → 段1/段2 均为 4 张图 → n-1 排除后缓存内容相同（3 ref）→ **段2 首次即 HIT**。
+
+开关（`h3_runner.py`，默认关闭）：
+
+```bat
+set QWEN3VL_KV_CACHE=1
+set H3_PLACEHOLDER_REF=1
+```
+
+- 占位图：`assets/placeholder_ref.png`（1024×576 中性双线性渐变，VIT 编码简单稳定）→ 复制到 ComfyUI `input/` 目录
+- 注意：占位图作为 `<Picture 4>: ` 参考进入模型（被 attend），中性渐变对 conditioning 影响很小；如生成效果异常可换纯色/深灰图
+- 不设置开关时段1 行为与原始一致（3 ref，缓存 2 张，段2 一次性 MISS）
+
 ## 安装
 
 ### 前置条件
@@ -173,6 +190,8 @@ qwen3vl-kvcache/
 ├── docs/
 │   ├── qwen3vl_kv_cache.md        详细原理 / 代码结构 / 验证记录 / 调试
 │   └── Qwen3VL_KV_Cache_实现原理详解.html   图文图解（v2）
+├── assets/
+│   └── placeholder_ref.png        占位图（H3_PLACEHOLDER_REF 方案用）
 └── patch/
     ├── qwen3vl.py                 补丁后（缓存管理：开关 / key / 拆层存储 / 自动 HIT-MISS）
     ├── llama.py                   补丁后（分段注意力 / 逐层加载 / 保存）
